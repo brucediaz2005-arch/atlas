@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ATLARA · Personal</title>
+<style>
+:root{color-scheme:dark;box-sizing:border-box}
+html,body{margin:0;height:100%;background:#02040a;overflow:hidden}
+:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+#lab{position:fixed;inset:0}
+#lab canvas{display:block;width:100%;height:100%}
+#hint{position:fixed;left:0;right:0;bottom:env(safe-area-inset-bottom,0px);padding:28px 24px 34px;text-align:center;font:500 14px system-ui,-apple-system,sans-serif;color:#9fd8ff;letter-spacing:.08em;transition:opacity .8s;cursor:pointer;background:linear-gradient(transparent,rgba(2,4,10,.85))}
+#hint.off{opacity:0;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="lab" aria-label="Laboratorio ATLARA"></div>
+<div id="hint">Toca la pantalla para activar la voz</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/environments/RoomEnvironment.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+
+const PALETA = {
+  atlas: { main: new THREE.Color('#00BFFF'), emi: new THREE.Color('#0A7FFF') },
+  lara:  { main: new THREE.Color('#FF2DAA'), emi: new THREE.Color('#FF2DAA') }
+};
+
+// ---------- render ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setClearColor(0x02040a, 1);
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+$('lab').appendChild(renderer.domElement);
+
+const escena = new THREE.Scene();
+const camara = new THREE.PerspectiveCamera(50, 1, 0.05, 200);
+camara.position.set(0, 1.7, 3.6);
+camara.lookAt(0, 1.9, -1.5);
+
+try {
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  escena.environment = pmrem.fromScene(new THREE.RoomEnvironment(), 0.04).texture;
+} catch (e) { console.warn('Sin entorno de reflejos:', e); }
+
+const luzReactor = new THREE.PointLight(0x00bfff, 1.6, 10);
+luzReactor.position.set(0, 1.8, 1.6);
+escena.add(luzReactor);
+
+// ---------- texturas PBR (carpeta texturas/) ----------
+const cacheTex = {};
+const cargadorTex = new THREE.TextureLoader();
+function textura(nombre, srgb, repeticion) {
+  const clave = nombre + '|' + repeticion;
+  if (cacheTex[clave]) return cacheTex[clave];
+  const t = cargadorTex.load('texturas/' + nombre + '.png');
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(repeticion, repeticion);
+  if (srgb) t.encoding = THREE.sRGBEncoding;
+  cacheTex[clave] = t;
+  return t;
+}
+function matPBR(base, rep) {
+  return new THREE.MeshStandardMaterial({
+    map: textura(base + '_baseColor', true, rep),
+    roughnessMap: textura(base + '_roughness', false, rep),
+    metalnessMap: textura(base + '_metallic', false, rep),
+    normalMap: textura(base + '_normal', false, rep),
+    metalness: 1.0, roughness: 1.0
+  });
+}
+
+const mTitanio = matPBR('titanio_cepillado', 1.5);
+const mPiedra = matPBR('piedra_oscura', 3);
+const mCarbono = matPBR('fibra_carbono', 2);
+// versión de titanio con emisión para anillos del reactor (color de estado)
+const mTitanioGlow = matPBR('titanio_cepillado', 1.5);
+mTitanioGlow.emissive = PALETA.atlas.emi.clone();
+mTitanioGlow.emissiveIntensity = 0.35;
+
+// luz de estado: emisión para triángulo, haz y partículas
+const mGlow = new THREE.MeshStandardMaterial({
+  color: 0x0a0f18, emissive: PALETA.atlas.emi.clone(), emissiveIntensity: 1.4,
+  metalness: 0.2, roughness: 0.4, transparent: true, opacity: 0.9
+});
+
+// ---------- océano (shader procedural, tras la cristalera) ----------
+const oceano = new THREE.Mesh(
+  new THREE.PlaneGeometry(30, 10, 1, 1),
+  new THREE.ShaderMaterial({
+    uniforms: { uTiempo: { value: 0 } },
+    vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+    fragmentShader: `
+      varying vec2 vUv; uniform float uTiempo;
+      float h(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+      float n(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
+        return mix(mix(h(i),h(i+vec2(1,0)),f.x), mix(h(i+vec2(0,1)),h(i+vec2(1,1)),f.x), f.y); }
+      void main(){
+        float y = vUv.y;
+        vec3 cielo = mix(vec3(0.04,0.08,0.16), vec3(0.75,0.42,0.32), smoothstep(0.55,0.75,y));
+        vec3 mar = mix(vec3(0.02,0.08,0.14), vec3(0.01,0.03,0.07), smoothstep(0.0,0.5,y));
+        float horizonte = smoothstep(0.50,0.52,y);
+        vec3 col = mix(mar, cielo, horizonte);
+        vec2 p = vec2(vUv.x*40.0, (0.5-y)*60.0 + uTiempo*2.0);
+        float ola = n(p) * 0.5 + n(p*2.3 + uTiempo) * 0.25;
+        col += (1.0 - horizonte) * ola * vec3(0.05,0.12,0.18);
+        float brillo = exp(-pow((vUv.x-0.62)*5.0,2.0)) * (1.0-horizonte) * (0.5+0.5*ola);
+        col += brillo * vec3(1.0,0.75,0.5) * 0.6;
+        gl_FragColor = vec4(col,1.0);
+      }`
+  })
+);
+oceano.position.set(0, 2.2, -5.2);
+escena.add(oceano);
+
+// ---------- estados ----------
+const estado = { modo: 'reposo', agente: 'atlas', volumen: 0 };
+const cur = { color: PALETA.atlas.main.clone(), emi: PALETA.atlas.emi.clone() };
+const tgt = { color: PALETA.atlas.main.clone(), emi: PALETA.atlas.emi.clone() };
+let analizador = null, datosAudio = null;
+const reloj = new THREE.Clock();
+let t = 0;
+
+function aplicarColorReactor() {
+  mTitanioGlow.emissive.copy(cur.emi);
+  mGlow.emissive.copy(cur.emi);
+  luzReactor.color.copy(cur.color);
+}
+
+function elegirAgente(id) {
+  estado.agente = id;
+  tgt.color.copy(PALETA[id].main);
+  tgt.emi.copy(PALETA[id].emi);
+}
+
+// UVs y normales: el GLB no trae UVs; se proyectan cilíndricas (paredes/anillos) o planas (suelo)
+function prepararGeometria(geo) {
+  if (!geo.attributes.normal) geo.computeVertexNormals();
+  const pos = geo.attributes.position, nor = geo.attributes.normal;
+  const uv = new Float32Array(pos.count * 2);
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    const ny = Math.abs(nor.getY(i));
+    if (ny > 0.7) { uv[i * 2] = x; uv[i * 2 + 1] = z; }
+    else { uv[i * 2] = Math.atan2(z, x) / (2 * Math.PI) + 0.5; uv[i * 2 + 1] = y; }
+  }
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+}
+
+const cargador = new THREE.GLTFLoader();
+
+// laboratorio: quitar reactores de referencia y asignar materiales por nombre
+cargador.load('models/Laboratorio_Interior_3D.glb', gltf => {
+  const lab = gltf.scene;
+  const quitar = [];
+  lab.traverse(o => { if (/^(Atlas_|Lara_)/.test(o.name)) quitar.push(o); });
+  quitar.forEach(o => o.parent && o.parent.remove(o));
+  lab.traverse(o => {
+    if (!o.isMesh) return;
+    prepararGeometria(o.geometry);
+    const n = o.name;
+    if (/suelo/.test(n)) o.material = mPiedra;
+    else if (/vitrina|estacion|consola/.test(n)) o.material = mCarbono;
+    else o.material = mTitanio;
+  });
+  escena.add(lab);
+  cargarReactor();
+}, undefined, err => {
+  console.error('Error cargando laboratorio:', err);
+  mostrar('No se cargó el laboratorio. Revisa la carpeta models/.');
+  cargarReactor();
+});
+
+const reactorGrupo = new THREE.Group();
+escena.add(reactorGrupo);
+const anillos = [];
+
+function cargarReactor() {
+  cargador.load('models/Reactor_Atlas_3D.glb', gltf => {
+    const modelo = gltf.scene;
+    modelo.updateMatrixWorld(true);
+    const grupos = {};
+    const pendientes = [];
+    modelo.traverse(o => {
+      if (!o.isMesh) return;
+      prepararGeometria(o.geometry);
+      const m = /anillo_(\d+)/.exec(o.name);
+      if (m) { o.material = mTitanioGlow; pendientes.push({ o, idx: +m[1] }); }
+      else if (/anclaje/.test(o.name)) o.material = mCarbono;
+      else o.material = mGlow;
+    });
+    pendientes.forEach(({ o, idx }) => {
+      if (!grupos[idx]) {
+        grupos[idx] = new THREE.Group();
+        reactorGrupo.add(grupos[idx]);
+        anillos.push({ pivote: grupos[idx], dir: idx % 2 ? -1 : 1, vel: 0.45 + idx * 0.15 });
+      }
+      grupos[idx].attach(o);
+    });
+    reactorGrupo.add(modelo);
+    aplicarColorReactor();
+  }, undefined, err => {
+    console.error('Error cargando reactor:', err);
+    mostrar('No se cargó el reactor. Revisa la carpeta models/.');
+  });
+}
+
+function mostrar(msg) {
+  const h = $('hint');
+  h.textContent = msg;
+  h.classList.remove('off');
+}
+
+function ajustar() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h);
+  camara.aspect = w / h;
+  camara.updateProjectionMatrix();
+}
+addEventListener('resize', ajustar);
+ajustar();
+
+function frame() {
+  const dt = Math.min(reloj.getDelta(), 0.05);
+  t += dt;
+  oceano.material.uniforms.uTiempo.value = t;
+
+  if (analizador && estado.modo === 'habla') {
+    analizador.getByteTimeDomainData(datosAudio);
+    let s = 0;
+    for (const v of datosAudio) { const x = (v - 128) / 128; s += x * x; }
+    estado.volumen = Math.sqrt(s / datosAudio.length) * 2.5;
+  } else {
+    estado.volumen *= 0.9;
+  }
+
+  // transición de emisión y luz en ~1.5 s; el material base no se sustituye
+  const k = Math.min(1, dt / 1.5 * 3);
+  cur.color.lerp(tgt.color, k);
+  cur.emi.lerp(tgt.emi, k);
+  aplicarColorReactor();
+
+  const vol = estado.volumen, modo = estado.modo;
+  let velocidad = 1, brillo = 1.0;
+  if (modo === 'escucha') { velocidad = 1.6; brillo = 1.6; }
+  if (modo === 'piensa')  { velocidad = 1.4 * (1 + 0.5 * Math.sin(t * 5)); brillo = 1.3; }
+  if (modo === 'habla')   { velocidad = 1.2; brillo = 1.2 + vol * 3; }
+
+  anillos.forEach(a => { a.pivote.rotation.z += a.dir * a.vel * dt * velocidad; });
+
+  mTitanioGlow.emissiveIntensity = 0.35 * brillo;
+  mGlow.emissiveIntensity = 1.4 * brillo;
+  luzReactor.intensity = 1.2 + 0.8 * (brillo - 1);
+
+  const escala = 1 + (modo === 'habla' ? vol * 0.05 : 0);
+  reactorGrupo.scale.setScalar(escala);
+
+  renderer.render(escena, camara);
+  requestAnimationFrame(frame);
+}
+frame();
+
+// ---------- voz ----------
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, vozActiva = false, hablando = false;
+let ventana = null, vtimer = null;
+let ctxAudio = null;
+
+const normal = s => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+const DESPERTAR = { atlas: /\batlas\b/, lara: /\b(lara|laura)\b/ };
+
+function encender(id) {
+  if (hablando || estado.modo === 'piensa') return;
+  estado.modo = 'escucha';
+  elegirAgente(id);
+}
+
+function esperarPregunta(id) {
+  ventana = id;
+  clearTimeout(vtimer);
+  vtimer = setTimeout(() => {
+    ventana = null;
+    if (estado.modo === 'escucha') estado.modo = 'reposo';
+  }, 8000);
+}
+
+function analizar(texto, final) {
+  const t2 = normal(texto);
+  let id = null, idx = -1, largo = 0;
+  for (const k in DESPERTAR) {
+    const m = DESPERTAR[k].exec(t2);
+    if (m && (idx < 0 || m.index < idx)) { id = k; idx = m.index; largo = m[0].length; }
+  }
+  if (!id) return false;
+  encender(id);
+  const pregunta = t2.slice(idx + largo).replace(/^[\s,.:;!?¿¡]+/, '').trim();
+  if (final) {
+    if (pregunta.length >= 3) enviar(id, pregunta);
+    else esperarPregunta(id);
+  }
+  return true;
+}
+
+function alResultado(ev) {
+  for (let i = ev.resultIndex; i < ev.results.length; i++) {
+    const r = ev.results[i];
+    if (analizar(r[0].transcript, r.isFinal)) continue;
+    if (r.isFinal && ventana) {
+      const pregunta = normal(r[0].transcript).trim();
+      if (pregunta.length >= 3) {
+        const id = ventana;
+        ventana = null; clearTimeout(vtimer);
+        enviar(id, pregunta);
+      }
+    }
+  }
+}
+
+function arrancar() { try { rec.start(); } catch (e) {} }
+function pausarEscucha() { try { rec && rec.stop(); } catch (e) {} }
+function reanudarEscucha() { if (vozActiva) arrancar(); }
+
+function iniciarVoz() {
+  if (!SR) { mostrar('Esta voz necesita Chrome.'); return; }
+  rec = new SR();
+  rec.lang = 'es-MX';
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.onresult = alResultado;
+  rec.onend = () => { if (vozActiva && !hablando) arrancar(); };
+  rec.onerror = e => {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      vozActiva = false;
+      mostrar('Permite el micrófono en Chrome (icono del candado) y recarga la página.');
+    } else if (e.error !== 'no-speech' && e.error !== 'aborted') {
+      mostrar('Micrófono: ' + e.error);
+    }
+  };
+  vozActiva = true;
+  arrancar();
+}
+
+async function enviar(id, pregunta) {
+  ventana = null; clearTimeout(vtimer);
+  estado.modo = 'piensa';
+  elegirAgente(id);
+  let texto = '';
+  try {
+    const r = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agente: id, mensaje: pregunta })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { mostrar('Chat: ' + (j.error || 'error ' + r.status)); estado.modo = 'reposo'; return; }
+    texto = j.respuesta || 'No pude responder en este momento.';
+  } catch (e) {
+    mostrar('Sin conexión con /api/chat');
+    estado.modo = 'reposo';
+    return;
+  }
+  await hablar(id, texto);
+}
+
+function prepararAnalizador(audio) {
+  if (!ctxAudio) ctxAudio = new (window.AudioContext || window.webkitAudioContext)();
+  const fuente = ctxAudio.createMediaElementSource(audio);
+  analizador = ctxAudio.createAnalyser();
+  analizador.fftSize = 512;
+  datosAudio = new Uint8Array(analizador.fftSize);
+  fuente.connect(analizador);
+  analizador.connect(ctxAudio.destination);
+}
+
+async function hablar(id, texto) {
+  hablando = true;
+  estado.modo = 'habla';
+  elegirAgente(id);
+  pausarEscucha();
+  let url = null;
+  try {
+    const r = await fetch('/api/voice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agente: id, texto })
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      mostrar('Voz: ' + (j.error || 'error ' + r.status));
+      throw new Error('voz ' + r.status);
+    }
+    url = URL.createObjectURL(await r.blob());
+    const audio = new Audio(url);
+    prepararAnalizador(audio);
+    const fin = new Promise(res => { audio.onended = res; audio.onerror = res; });
+    await audio.play();
+    await fin;
+  } catch (e) {
+    console.warn('Voz no reproducida:', e);
+  } finally {
+    if (url) URL.revokeObjectURL(url);
+    analizador = null;
+    hablando = false;
+    estado.modo = 'reposo';
+    reanudarEscucha();
+  }
+}
+
+$('hint').addEventListener('click', () => {
+  if (!ctxAudio) ctxAudio = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctxAudio.state === 'suspended') ctxAudio.resume();
+  iniciarVoz();
+  if (vozActiva) $('hint').classList.add('off');
+});
+</script>
+</body>
+</html>
