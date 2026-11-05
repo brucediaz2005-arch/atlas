@@ -336,7 +336,9 @@ function iniciarVoz() {
   rec.onerror = e => {
     if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
       vozActiva = false;
-      mostrar('Permite el micrófono en Chrome y recarga la página.');
+      mostrar('Permite el micrófono en Chrome (icono del candado) y recarga la página.');
+    } else if (e.error !== 'no-speech' && e.error !== 'aborted') {
+      mostrar('Micrófono: ' + e.error);
     }
   };
   vozActiva = true;
@@ -354,10 +356,13 @@ async function enviar(id, pregunta) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ agente: id, mensaje: pregunta })
     });
-    const j = await r.json();
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { mostrar('Chat: ' + (j.error || 'error ' + r.status)); estado.modo = 'reposo'; return; }
     texto = j.respuesta || 'No pude responder en este momento.';
   } catch (e) {
-    texto = 'No hay conexión con el servidor.';
+    mostrar('Sin conexión con /api/chat');
+    estado.modo = 'reposo';
+    return;
   }
   await hablar(id, texto);
 }
@@ -384,7 +389,11 @@ async function hablar(id, texto) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ agente: id, texto })
     });
-    if (!r.ok) throw new Error('voz ' + r.status);
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      mostrar('Voz: ' + (j.error || 'error ' + r.status));
+      throw new Error('voz ' + r.status);
+    }
     url = URL.createObjectURL(await r.blob());
     const audio = new Audio(url);
     prepararAnalizador(audio);
